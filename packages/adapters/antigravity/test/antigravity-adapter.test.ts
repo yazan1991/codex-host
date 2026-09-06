@@ -107,6 +107,63 @@ async function fakeAgy(lines: readonly string[]): Promise<{
   return { command, cwd, cleanup };
 }
 
+async function fakeAgyWithCapturedArgs(lines: readonly string[]): Promise<{
+  command: string;
+  cwd: string;
+  argsPath: string;
+  cleanup(): Promise<void>;
+}> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codexhost-agy-"));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "codexhost-agy-cwd-"));
+  const argsPath = path.join(directory, "args.txt");
+  const cleanup = async (): Promise<void> => {
+    for (const target of [directory, cwd]) {
+      await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  };
+  if (process.platform === "win32") {
+    const command = path.join(directory, "agy.cmd");
+    const script = [
+      "@echo off",
+      'if "%~1"=="models" (',
+      ...lines.map((line) => `  echo ${line}`),
+      "  exit /b 0",
+      ")",
+      'if "%~1"=="--print=/usage" exit /b 0',
+      'break > "%CODEXHOST_TEST_ARGS%"',
+      ":args",
+      'if "%~1"=="" goto result',
+      'echo %~1>> "%CODEXHOST_TEST_ARGS%"',
+      "shift",
+      "goto args",
+      ":result",
+      'echo {"event":"init","conversation_id":"c1","permission_mode":"dangerously-skip-permissions"}',
+      'echo {"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","num_turns":1,"response":"HARNESS_TOOL_PASS"}}',
+    ].join("\r\n");
+    await writeFile(command, `${script}\r\n`);
+    return { command, cwd, argsPath, cleanup };
+  }
+  const command = path.join(directory, "agy");
+  const script = [
+    "#!/bin/sh",
+    'if [ "$1" = "models" ]; then',
+    "  cat <<'MODELS'",
+    ...lines,
+    "MODELS",
+    "  exit 0",
+    "fi",
+    'if [ "$1" = "--print=/usage" ]; then',
+    "  exit 0",
+    "fi",
+    'printf \'%s\\n\' "$@" > "$CODEXHOST_TEST_ARGS"',
+    'printf \'%s\\n\' \'{"event":"init","conversation_id":"c1","permission_mode":"dangerously-skip-permissions"}\'',
+    'printf \'%s\\n\' \'{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","num_turns":1,"response":"HARNESS_TOOL_PASS"}}\'',
+  ].join("\n");
+  await writeFile(command, `${script}\n`);
+  await chmod(command, 0o755);
+  return { command, cwd, argsPath, cleanup };
+}
+
 // Labels stay free of parentheses so the batch shim does not need escaping;
 // the label-suffix handling is covered by the Catalog tests above.
 const FAKE_MODELS = [
@@ -116,6 +173,105 @@ const FAKE_MODELS = [
 ] as const;
 
 describe("Antigravity Adapter", () => {
+  it("maps unattended delegation to skip permissions", async () => {
+    const { command, cwd, cleanup } = await fakeAgy(FAKE_MODELS);
+    const adapter = new AntigravityAdapter({ command });
+    try {
+      const opened = await adapter.open({
+        kind: "create",
+        cwd,
+        executionPolicy: "unattended-full-access",
+      });
+      expect(opened.ok).toBe(true);
+      if (opened.ok) {
+        expect(opened.value.initialState.effectivePermissionModeId).toBe(
+          "dangerously-skip-permissions",
+        );
+        await opened.value.close();
+      }
+    } finally {
+      await adapter.close();
+      await cleanup();
+    }
+  });
+
+  it("lets an explicit configured permission mode override unattended delegation", async () => {
+    const { command, cwd, cleanup } = await fakeAgy(FAKE_MODELS);
+    const adapter = new AntigravityAdapter({ command });
+    try {
+      const opened = await adapter.open({
+        kind: "create",
+        cwd,
+        executionPolicy: "unattended-full-access",
+        permissionModeId: harnessPermissionModeIdSchema.parse("configured"),
+      });
+      expect(opened.ok).toBe(true);
+      if (opened.ok) {
+        expect(opened.value.initialState.effectivePermissionModeId).toBe("configured");
+        await opened.value.close();
+      }
+    } finally {
+      await adapter.close();
+      await cleanup();
+    }
+  });
+
+  it("preserves configured permissions for normal create sessions", async () => {
+    const { command, cwd, cleanup } = await fakeAgy(FAKE_MODELS);
+    const adapter = new AntigravityAdapter({ command });
+    try {
+      const opened = await adapter.open({ kind: "create", cwd });
+      expect(opened.ok).toBe(true);
+      if (opened.ok) {
+        expect(opened.value.initialState.effectivePermissionModeId).toBe("configured");
+        await opened.value.close();
+      }
+    } finally {
+      await adapter.close();
+      await cleanup();
+    }
+  });
+
+  it("passes the skip-permissions flag to agy for unattended turns", async () => {
+    const { command, cwd, argsPath, cleanup } = await fakeAgyWithCapturedArgs(FAKE_MODELS);
+    const adapter = new AntigravityAdapter({
+      command,
+      environment: { ...process.env, CODEXHOST_TEST_ARGS: argsPath },
+    });
+    try {
+      const opened = await adapter.open({
+        kind: "create",
+        cwd,
+        executionPolicy: "unattended-full-access",
+      });
+      expect(opened.ok).toBe(true);
+      if (!opened.ok) return;
+      expect(
+        await opened.value.execute({
+          type: "turn.start",
+          turnId: hostTurnIdSchema.parse("antigravity-unattended"),
+          input: [{ type: "text", text: "Reply exactly: HARNESS_TOOL_PASS" }],
+        }),
+      ).toMatchObject({ ok: true });
+      const iterator = opened.value.outputs[Symbol.asyncIterator]();
+      let completed = false;
+      for (let attempt = 0; attempt < 100 && !completed; attempt += 1) {
+        const next = await iterator.next();
+        if (next.done) break;
+        if (next.value.kind === "event" && next.value.event.type === "turn.completed") {
+          completed = true;
+          expect(next.value.event.outcome.status).toBe("succeeded");
+        }
+      }
+      expect(completed).toBe(true);
+      expect(await readFile(argsPath, "utf8")).toContain("--dangerously-skip-permissions");
+      await opened.value.close();
+    } finally {
+      await adapter.close();
+      await cleanup();
+    }
+  }, 15_000);
+
   it("refuses Desktop approval execution when the native CLI cannot confirm the Hook configuration", async () => {
     const { command, cwd, cleanup } = await fakeAgy(FAKE_MODELS);
     const adapter = new AntigravityAdapter({ command });

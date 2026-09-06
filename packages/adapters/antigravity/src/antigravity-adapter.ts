@@ -1709,7 +1709,10 @@ export class AntigravityAdapter implements HarnessAdapter {
         };
       }
     }
-    let permissionMode: AntigravityPermissionMode = "configured";
+    let permissionMode: AntigravityPermissionMode =
+      input.kind === "create" && input.executionPolicy === "unattended-full-access"
+        ? "dangerously-skip-permissions"
+        : "configured";
     if (input.kind === "create" && input.permissionModeId) {
       try {
         permissionMode = decodeAntigravityPermissionModeId(input.permissionModeId);
