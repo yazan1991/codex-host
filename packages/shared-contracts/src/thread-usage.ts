@@ -16,6 +16,8 @@ export const threadUsageSnapshotSchema = z
     reasoningOutputTokens: nonNegativeSafeIntegerSchema.optional(),
     totalTokens: nonNegativeSafeIntegerSchema.optional(),
     totalCostUsd: finiteNonNegativeNumberSchema.optional(),
+    totalCredits: finiteNonNegativeNumberSchema.optional(),
+    contextUsagePercent: finiteNonNegativeNumberSchema.optional(),
     cacheHitRatePercent: cacheHitRatePercentSchema.optional(),
     contextWindowTokens: nonNegativeSafeIntegerSchema.optional(),
     contextUsedTokens: nonNegativeSafeIntegerSchema.optional(),
@@ -91,6 +93,8 @@ export const accountResetCreditsSchema = z
 
 export const accountCreditsSnapshotSchema = z
   .object({
+    /** Native label when the primary limit is scoped to a model or product group. */
+    label: z.string().min(1).optional(),
     usedPercent: usagePercentSchema,
     resetsAt: z.string().min(1).optional(),
     periodType: z.enum(["weekly", "monthly", "five_hour", "seven_day", "unknown"]),

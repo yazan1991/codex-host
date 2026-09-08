@@ -1,4 +1,5 @@
 import type {
+  HarnessAccountSnapshot,
   HarnessCommandCatalog,
   HarnessId,
   HarnessInspection,
@@ -79,6 +80,9 @@ export interface CreateSessionInput {
 }
 
 export interface ResumeSessionInput {
+  /** Saved selection hints for Harnesses that initialize configuration lazily. */
+  model?: HarnessModelRef;
+  thinkingOptionId?: HarnessThinkingOptionId;
   kind: "resume";
   nativeRef: NativeSessionRef;
   cwd: string;
@@ -97,6 +101,10 @@ export interface ForkSessionInput {
 }
 
 export interface RollbackLastTurnSessionInput {
+  /** Current settings required by a derived Session before it can start native work. */
+  model?: HarnessModelRef;
+  thinkingOptionId?: HarnessThinkingOptionId;
+  permissionModeId?: HarnessPermissionModeId;
   kind: "rollbackLastTurn";
   sourceRef: NativeSessionRef;
   cwd: string;
@@ -274,6 +282,8 @@ export interface HostAgentMessageItem {
   type: "agentMessage";
   itemId: HostItemId;
   text: string;
+  /** Omit when the Harness cannot distinguish progress from its final answer. */
+  phase?: "commentary" | "final_answer";
 }
 
 export interface HostReasoningItem {
@@ -386,6 +396,9 @@ export interface HostTurnSnapshot {
   items: HostItemSnapshot[];
   outcome: HistoricalTurnOutcome;
   model?: HarnessModelRef;
+  /** Native wall-clock timestamps; omit when unavailable. */
+  startedAtMs?: number;
+  completedAtMs?: number;
 }
 
 export interface HostThreadSnapshot {
@@ -541,6 +554,11 @@ export interface HarnessAdapter {
   readonly sessionImport?: HarnessSessionImportCapability;
   readonly subagents?: HarnessSubagentCapability;
   readonly webUi?: HarnessWebUiAction;
+  /** Fresh read-only quota for current native authentication. Return null when unavailable;
+   * never return session spend, old authentication caches, or start a model Turn.
+   * Implementations must bound requests and release inspection resources on close.
+   */
+  inspectAccount?(): Promise<HarnessAccountSnapshot | null>;
 
   inspect(input?: InspectHarnessInput): Promise<HarnessInspection>;
   open(input: OpenSessionInput): Promise<HarnessResult<HarnessSession>>;

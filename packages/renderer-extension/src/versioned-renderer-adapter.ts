@@ -1,4 +1,6 @@
 import {
+  encodeHarnessPluginRoute,
+  harnessIdSchema,
   harnessModelRefSchema,
   harnessPermissionModeIdSchema,
   harnessThinkingOptionIdSchema,
@@ -133,6 +135,8 @@ declare global {
   }
 }
 
+const KIRO_CLI_HARNESS_ID = harnessIdSchema.parse("kiro-cli");
+
 function transportModelIdForAgent(agent: RendererAgent): string | null {
   if (agent === "pi") return PI_TRANSPORT_MODEL_ID;
   if (agent === "claude-code") return CLAUDE_CODE_TRANSPORT_MODEL_ID;
@@ -141,6 +145,7 @@ function transportModelIdForAgent(agent: RendererAgent): string | null {
   if (agent === "grok") return GROK_TRANSPORT_MODEL_ID;
   if (agent === "omp") return OMP_TRANSPORT_MODEL_ID;
   if (agent === "antigravity") return ANTIGRAVITY_TRANSPORT_MODEL_ID;
+  if (agent === "kiro-cli") return encodeHarnessPluginRoute({ harnessId: KIRO_CLI_HARNESS_ID });
   return null;
 }
 
@@ -922,7 +927,14 @@ export function modelSelectionForAgent(
                 ? ompTransportModelId(model, thinkingOptionId, permissionModeId)
                 : agent === "antigravity"
                   ? antigravityTransportModelId(model, permissionModeId, thinkingOptionId)
-                  : transportModelIdForAgent(agent);
+                  : agent === "kiro-cli"
+                    ? encodeHarnessPluginRoute({
+                        harnessId: KIRO_CLI_HARNESS_ID,
+                        ...(model ? { model } : {}),
+                        ...(thinkingOptionId ? { thinkingOptionId } : {}),
+                        ...(permissionModeId ? { permissionModeId } : {}),
+                      })
+                    : transportModelIdForAgent(agent);
   return transportModelId ? { model: transportModelId, reasoningEffort } : officialSelection;
 }
 
@@ -962,18 +974,33 @@ export function installCurrentRendererAdapter(): {
     () => window.__codexhostDraftPrewarmPolicyV1,
     () => findActivePrewarmTargets(document),
   );
-  const clientsByTarget = new WeakMap<PrewarmTarget, RendererModelClient>();
+  const clientsByTarget = new WeakMap<
+    PrewarmTarget,
+    {
+      client: RendererModelClient;
+      policy: RendererDraftPrewarmPolicy | null;
+      requestClient: PrewarmTarget["requestClient"];
+    }
+  >();
   const steeringCleanups = new Set<() => void>();
-  const modelClientForTargets = (targets: readonly PrewarmTarget[]): RendererModelClient | null => {
+  const modelClientForTargets = (
+    targets: readonly PrewarmTarget[],
+    policy: RendererDraftPrewarmPolicy | null = null,
+  ): RendererModelClient | null => {
     const target = targets[0];
     if (targets.length !== 1 || !target) return null;
     const cached = clientsByTarget.get(target);
-    if (cached) return cached;
+    if (cached?.policy === policy && cached.requestClient === target.requestClient)
+      return cached.client;
     const client = createRendererModelClient([target]);
     if (client) {
-      const cleanup = installRendererExternalSteering(target);
-      if (cleanup) steeringCleanups.add(cleanup);
-      clientsByTarget.set(target, client);
+      // A new connection must not inherit unsupported-method observations.
+      // Steering belongs to the manager, so do not install duplicate hooks.
+      if (!cached) {
+        const cleanup = installRendererExternalSteering(target);
+        if (cleanup) steeringCleanups.add(cleanup);
+      }
+      clientsByTarget.set(target, { client, policy, requestClient: target.requestClient });
     }
     return client;
   };
@@ -981,7 +1008,7 @@ export function installCurrentRendererAdapter(): {
   let activeRouteClient: RendererModelClient | null = null;
   const syncActiveRoute = (route: RendererRequestRoute | null): RendererModelClient | null => {
     const policy = route?.policy ?? null;
-    const client = route ? modelClientForTargets(route.targets) : null;
+    const client = route ? modelClientForTargets(route.targets, route.policy) : null;
     if (activeRoutePolicy === policy && activeRouteClient === client) return client;
     activeRoutePolicy = policy;
     activeRouteClient = client;
@@ -1002,7 +1029,8 @@ export function installCurrentRendererAdapter(): {
     currentHostId: () => currentRequestRoute()?.policy.hostId ?? null,
     clientForHost(hostId: string): RendererModelClient | null {
       const route = currentRequestRoute();
-      if (route?.policy.hostId === hostId) return modelClientForTargets(route.targets);
+      if (route?.policy.hostId === hostId)
+        return modelClientForTargets(route.targets, route.policy);
       const policy = window.__codexhostDraftPrewarmPolicyV1;
       if (isDraftPrewarmPolicyReady(policy) && hasPolicyRequestTarget(policy)) return null;
       const targets = rendererRequestTargetsForHost(findActivePrewarmTargets(document), hostId);
@@ -1052,6 +1080,11 @@ export function installCurrentRendererAdapter(): {
         throw new Error("Codex Account reset-credit consume is unavailable");
       }
       return client.consumeCodexAccountResetCredit(input);
+    },
+    listHarnessAccounts: () => {
+      const client = currentModelClient();
+      if (!client.listHarnessAccounts) throw new Error("Harness account inspection is unavailable");
+      return client.listHarnessAccounts();
     },
     listCodexAccounts: () => currentModelClient().listCodexAccounts(),
     refreshCodexAccounts: () => {

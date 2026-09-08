@@ -10,12 +10,14 @@ import {
   type SpawnOptions,
 } from "@anthropic-ai/claude-agent-sdk";
 import { sanitizeDiagnosticTail } from "@codexhost/harness-adapter";
-import type { HarnessThinkingOptionId } from "@codexhost/shared-contracts";
+import type { HarnessAccountSnapshot, HarnessThinkingOptionId } from "@codexhost/shared-contracts";
+import { projectClaudeAccountUsage } from "./account-usage.js";
 
 import { resolveClaudeCodeExecutable, withNodeRuntimeOnPath } from "./command.js";
 import type { ClaudeModelInspectionSnapshot } from "./model-catalog.js";
 import { ClaudeNativeTurnAccumulator, parseClaudePlanLimitEvent } from "./native-message.js";
 import { isClaudePermissionMode, type ClaudePermissionMode } from "./permission-modes.js";
+import { closeClaudeProcessGroup } from "./process-fence.js";
 import { claudeThinkingConfiguration, parseClaudeThinkingOptionId } from "./thinking-options.js";
 import type {
   ClaudeApprovalRequest,
@@ -369,6 +371,7 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
   #provider: string | undefined;
   #query: Query | null = null;
   #started = false;
+  #backgroundTasks = new Set<string>();
 
   constructor(options: ClaudeSdkTransportOptions) {
     this.sessionId = options.sessionId;
@@ -520,7 +523,7 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
     userMessageId: string,
     onEvent: (event: ClaudeTurnEvent) => void,
   ): Promise<ClaudeTransportTurnResult> {
-    if (!this.#started || !this.#query) {
+    if (this.#closePromise || !this.#started || !this.#query) {
       return Promise.reject(new Error("Claude SDK transport is not started"));
     }
     if (this.#active) return Promise.reject(new Error("Claude SDK transport is busy"));
@@ -750,22 +753,55 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
   }
 
   async #close(): Promise<void> {
+    const failures: unknown[] = [];
     if (this.#active) this.#closeInteractions(this.#active, "cancelled");
-    this.#input.end();
-    this.#query?.close();
-    await Promise.race([
-      this.#consumeTask?.catch(() => undefined) ?? Promise.resolve(),
-      delay(this.#closeTimeoutMs),
-    ]);
-    for (const child of this.#children) {
-      if (!processExited(child)) child.kill("SIGTERM");
+    try {
+      const timeout = rejectAfter(this.#closeTimeoutMs, "Claude background tasks did not stop");
+      try {
+        await Promise.race([this.#stopBackgroundTasks(), timeout.promise]);
+      } finally {
+        timeout.cancel();
+      }
+    } catch (error) {
+      failures.push(error);
     }
-    await Promise.race([
-      Promise.all(this.#children.map((child) => this.#waitForExit(child))),
-      delay(this.#closeTimeoutMs),
-    ]);
-    for (const child of this.#children) {
-      if (!processExited(child)) child.kill("SIGKILL");
+    const stopOwnedProcesses = async (): Promise<void> => {
+      const stopped = await Promise.allSettled(
+        this.#children.map((child) => closeClaudeProcessGroup(child, this.#closeTimeoutMs)),
+      );
+      for (const result of stopped) if (result.status === "rejected") failures.push(result.reason);
+    };
+    // taskkill needs a living root to enumerate the Windows tree. Unix groups remain addressable
+    // after their root exits, so let the SDK initiate its native cleanup first there.
+    if (process.platform === "win32") await stopOwnedProcesses();
+    this.#input.end();
+    try {
+      this.#query?.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (process.platform !== "win32") await stopOwnedProcesses();
+    const exitTimeout = rejectAfter(this.#closeTimeoutMs, "Claude SDK process did not exit");
+    try {
+      await Promise.race([
+        Promise.all(this.#children.map((child) => this.#waitForExit(child))),
+        exitTimeout.promise,
+      ]);
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      exitTimeout.cancel();
+    }
+    const drainTimeout = rejectAfter(this.#closeTimeoutMs, "Claude SDK output did not drain");
+    try {
+      await Promise.race([
+        this.#consumeTask?.catch(() => undefined) ?? Promise.resolve(),
+        drainTimeout.promise,
+      ]);
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      drainTimeout.cancel();
     }
     this.#query = null;
     const active = this.#active;
@@ -774,11 +810,49 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
     this.#idleAccumulator = null;
     this.#idleLive = false;
     active?.reject(new Error("Claude SDK transport closed"));
+    if (failures.length > 0)
+      throw new AggregateError(failures, "Claude SDK shutdown could not be confirmed");
+  }
+
+  async #stopBackgroundTasks(): Promise<void> {
+    const requested = new Set<string>();
+    const deadline = Date.now() + this.#closeTimeoutMs;
+    while (this.#backgroundTasks.size > 0) {
+      if (Date.now() >= deadline || !this.#query)
+        throw new Error("Claude background tasks remain active");
+      for (const id of this.#backgroundTasks) {
+        if (requested.has(id)) continue;
+        requested.add(id);
+        await this.#query.stopTask(id);
+      }
+      // A control receipt alone is not a task terminal; consume its native stopped notification.
+      if (this.#backgroundTasks.size > 0) await delay(10);
+    }
+  }
+
+  #observeBackgroundTasks(message: unknown): void {
+    if (!isRecord(message) || message.type !== "system") return;
+    if (message.subtype === "background_tasks_changed" && Array.isArray(message.tasks)) {
+      this.#backgroundTasks = new Set(
+        message.tasks.flatMap((task) =>
+          isRecord(task) && typeof task.task_id === "string" ? [task.task_id] : [],
+        ),
+      );
+    } else if (message.subtype === "task_started" && typeof message.task_id === "string") {
+      this.#backgroundTasks.add(message.task_id);
+    } else if (
+      message.subtype === "task_notification" &&
+      typeof message.task_id === "string" &&
+      ["completed", "failed", "stopped"].includes(String(message.status))
+    ) {
+      this.#backgroundTasks.delete(message.task_id);
+    }
   }
 
   async #consume(activeQuery: Query): Promise<void> {
     try {
       for await (const message of activeQuery) {
+        this.#observeBackgroundTasks(message);
         const permissionMode = permissionModeFromMessage(message);
         if (permissionMode && permissionMode !== this.#permissionMode) {
           this.#permissionMode = permissionMode;
@@ -860,6 +934,7 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
       signal: options.signal,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      detached: process.platform !== "win32",
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
       this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk.toString()}`);
@@ -901,7 +976,7 @@ export class ClaudeSdkModelInspector implements ClaudeModelInspector {
     this.#queryFactory = options.queryFactory ?? query;
   }
 
-  async inspect(): Promise<ClaudeModelInspectionSnapshot> {
+  #createQuery(): Query {
     if (this.#closePromise) throw new Error("Claude SDK Model inspector is closing");
     const executable = resolveClaudeCodeExecutable({
       ...(this.#command ? { command: this.#command } : {}),
@@ -925,6 +1000,33 @@ export class ClaudeSdkModelInspector implements ClaudeModelInspector {
       },
     });
     this.#query = activeQuery;
+    return activeQuery;
+  }
+
+  async inspectAccount(): Promise<HarnessAccountSnapshot | null> {
+    const timeout = rejectAfter(10_000, "Claude SDK account inspection timed out");
+    try {
+      const activeQuery = this.#createQuery();
+      return await Promise.race([
+        (async () => {
+          await activeQuery.initializationResult();
+          const getUsage = activeQuery.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+          if (typeof getUsage !== "function") return null;
+          const usage = await getUsage.call(activeQuery);
+          if (!usage.rate_limits_available || !usage.rate_limits) return null;
+          const account = await activeQuery.accountInfo();
+          return projectClaudeAccountUsage(usage, account);
+        })(),
+        timeout.promise,
+      ]);
+    } finally {
+      timeout.cancel();
+      await this.close();
+    }
+  }
+
+  async inspect(): Promise<ClaudeModelInspectionSnapshot> {
+    const activeQuery = this.#createQuery();
     try {
       const initialized = await activeQuery.initializationResult();
       const candidate = activeQuery as unknown as Record<string, unknown>;
