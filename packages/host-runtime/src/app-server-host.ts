@@ -512,6 +512,7 @@ export class AppServerHost {
   #runningSubagentsByParent = new Map<string, Set<string>>();
   #pendingExternalCommandRequests = new Set<string>();
   #closeRequested = false;
+  readonly #pluginLoadAbort = new AbortController();
   #drainActiveWorkOnInputEnd = false;
   #desktopInputEnded = false;
 
@@ -644,6 +645,7 @@ export class AppServerHost {
   close(): void {
     if (this.#closeRequested) return;
     this.#closeRequested = true;
+    this.#pluginLoadAbort.abort();
     this.#externalSteering.close();
     this.#signalActiveWorkChanged();
     this.#options.desktopInput.destroy();
@@ -677,6 +679,7 @@ export class AppServerHost {
         managedRemoteHost: false,
       },
       reservedIds: new Set(this.#externalAdapters.keys()),
+      signal: this.#pluginLoadAbort.signal,
       diagnose: (diagnostic) => this.#diagnose(`Harness plugin: ${JSON.stringify(diagnostic)}`),
     });
     if (this.#closeRequested) {
