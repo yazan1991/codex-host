@@ -24,6 +24,7 @@ import {
   type CreateProvisionalThreadInput,
   type DelegationStatus,
   type FindRecentDelegationInput,
+  type RebindSubagentSessionInput,
   type ReplaceReadySessionAfterLastTurnInput,
   type ReplaceReadySessionInput,
   type StoredDelegationRecordV1,
@@ -115,11 +116,23 @@ function processIdentity(pid: number): ProcessIdentity | null {
     if (systemErrorCode(error) !== "EPERM") return null;
   }
 
-  if (process.platform !== "win32") {
+  if (process.platform !== "win32" && process.platform !== "darwin") {
     return { executablePath: null, startedAt: null };
   }
 
   try {
+    if (process.platform === "darwin") {
+      // PID existence is insufficient after reuse. Query only on lock contention;
+      // lstart has second precision, covered by the existing start-time tolerance.
+      const result = execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        env: { ...process.env, LC_ALL: "C" },
+        timeout: 1_000,
+      }).trim();
+      const startedAt = Date.parse(result);
+      return { executablePath: null, startedAt: Number.isFinite(startedAt) ? startedAt : null };
+    }
     const query = [
       "$ErrorActionPreference = 'Stop'",
       `$process = Get-Process -Id ${pid}`,
@@ -168,7 +181,7 @@ function lockOwnerIsLive(lock: Partial<LockRecord>): boolean {
   }
   const identity = processIdentity(lock.pid);
   if (!identity) return false;
-  if (process.platform !== "win32") return true;
+  if (process.platform !== "win32" && process.platform !== "darwin") return true;
 
   if (identity.executablePath && lock.executablePath) {
     if (
@@ -477,11 +490,59 @@ export class MappingStore {
     }));
   }
 
+  // Keep native ref, Turn mappings and the indexed create request in one serialized
+  // record mutation; separate setters could leave a child pointing at mixed Sessions.
+  async rebindSubagentSession(input: RebindSubagentSessionInput): Promise<StoredThreadRecordV1> {
+    return this.#update(input.hostThreadId, (current) => {
+      const parent = this.#records.get(input.parentHostThreadId);
+      if (
+        current.state !== "ready" ||
+        !current.nativeSessionRef ||
+        current.subagent?.parentHostThreadId !== input.parentHostThreadId ||
+        parent?.state !== "ready" ||
+        parent.harnessId !== current.harnessId ||
+        input.previousNativeSessionRef.harnessId !== current.harnessId ||
+        input.nativeSessionRef.harnessId !== current.harnessId ||
+        !sameJson(parent.nativeSessionRef, input.nativeSessionRef)
+      )
+        throw new MappingStoreError(
+          "MAPPING_CONFLICT",
+          "Subagent replacement must belong to its current parent Session",
+        );
+      if (
+        sameJson(current.nativeSessionRef, input.nativeSessionRef) &&
+        current.createRequestId === input.createRequestId
+      )
+        return null;
+      if (!sameJson(current.nativeSessionRef, input.previousNativeSessionRef)) {
+        throw new MappingStoreError(
+          "MAPPING_CONFLICT",
+          "Subagent replacement source Session is stale",
+        );
+      }
+      const nativeSessionId = input.nativeSessionRef.nativeSessionId;
+      return {
+        ...current,
+        createRequestId: input.createRequestId,
+        nativeSessionRef: input.nativeSessionRef,
+        turnMappings: current.turnMappings.map((mapping) => ({
+          ...mapping,
+          nativeTurnRef: { ...mapping.nativeTurnRef, nativeSessionId },
+          ...(mapping.nativeCheckpointRef
+            ? { nativeCheckpointRef: { ...mapping.nativeCheckpointRef, nativeSessionId } }
+            : {}),
+        })),
+      };
+    });
+  }
+
   async replaceReadySession(input: ReplaceReadySessionInput): Promise<StoredThreadRecordV1> {
     return this.#update(input.hostThreadId, (current) => {
       if (
         current.state !== "ready" ||
         !current.nativeSessionRef ||
+        current.revision !== input.expectedRevision ||
+        !sameJson(current.nativeSessionRef, input.expectedNativeSessionRef) ||
         !current.forkSource ||
         current.forkSource.hostThreadId !== input.forkSource.hostThreadId ||
         current.nativeSessionRef.nativeSessionId === input.nativeSessionRef.nativeSessionId ||
@@ -493,7 +554,7 @@ export class MappingStore {
       ) {
         throw new MappingStoreError(
           "MAPPING_CONFLICT",
-          "Ready Session replacement must retain an exact shorter derived prefix",
+          "Ready Session replacement must match the expected record and retain an exact shorter derived prefix",
         );
       }
       return {
@@ -512,6 +573,8 @@ export class MappingStore {
       if (
         current.state !== "ready" ||
         !current.nativeSessionRef ||
+        current.revision !== input.expectedRevision ||
+        !sameJson(current.nativeSessionRef, input.expectedNativeSessionRef) ||
         input.turnMappings.length !== current.turnMappings.length - 1 ||
         input.turnMappings.some(
           ({ hostTurnId }, index) => hostTurnId !== current.turnMappings[index]?.hostTurnId,
@@ -519,7 +582,7 @@ export class MappingStore {
       ) {
         throw new MappingStoreError(
           "MAPPING_CONFLICT",
-          "Last-Turn Session replacement must retain the exact shorter Host Turn prefix",
+          "Last-Turn Session replacement must match the expected record and retain the exact shorter Host Turn prefix",
         );
       }
       return {
