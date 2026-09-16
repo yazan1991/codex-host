@@ -107,8 +107,9 @@ export class DeepSeekHarnessAdapter implements HarnessAdapter {
             harnessId: this.harnessId,
             nativeSessionId,
             formatVersion: 1,
-            ...(this.#delegate?.version === "0.1.5-rc.1"
-              ? { locator: { dshVersion: "0.1.5-rc.1" } }
+            ...(this.#delegate?.version === "0.1.5-rc.1" ||
+            this.#delegate?.version === "0.1.6-alpha.1"
+              ? { locator: { dshVersion: this.#delegate.version } }
               : {}),
           }),
         },
