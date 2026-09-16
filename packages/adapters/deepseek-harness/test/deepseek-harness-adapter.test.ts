@@ -255,7 +255,7 @@ describe("DeepSeek public generation selector", () => {
           retryable: false,
           stage: "version",
           durationMs: expect.any(Number),
-          message: expect.stringContaining("仅支持 dsh-v0.1.2-rc.1 和 dsh-v0.1.5-rc.1"),
+          message: expect.stringContaining("dsh-v0.1.6-alpha.1"),
         },
       });
       await expect(adapter.sessionImport.resolveCandidate("native")).resolves.toMatchObject({

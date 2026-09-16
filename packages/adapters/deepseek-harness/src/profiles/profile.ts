@@ -9,7 +9,7 @@ import { DEEPSEEK_V012_PROFILE } from "./v012.js";
 import { DEEPSEEK_V015_PROFILE } from "./v015.js";
 export { DEEPSEEK_V012_PROFILE, DEEPSEEK_V015_PROFILE };
 
-export type DeepSeekModernVersion = "0.1.2-rc.1" | "0.1.5-rc.1";
+export type DeepSeekModernVersion = "0.1.2-rc.1" | "0.1.5-rc.1" | "0.1.6-alpha.1";
 
 /** Selected once from the executable's exact version; no cross-profile fallback. */
 export interface DeepSeekModernProfile {
@@ -38,8 +38,10 @@ export interface DeepSeekModernProfile {
 
 export function deepSeekModernProfile(version: DeepSeekModernVersion): DeepSeekModernProfile {
   if (version === "0.1.2-rc.1") return DEEPSEEK_V012_PROFILE;
-  if (version === "0.1.5-rc.1") return DEEPSEEK_V015_PROFILE;
-  throw new TypeError("DeepSeek Harness only supports 0.1.2-rc.1 and 0.1.5-rc.1");
+  if (version === "0.1.5-rc.1" || version === "0.1.6-alpha.1") return DEEPSEEK_V015_PROFILE;
+  throw new TypeError(
+    "DeepSeek Harness only supports 0.1.2-rc.1, 0.1.5-rc.1, and 0.1.6-alpha.1",
+  );
 }
 
 export function isDeepSeekV015(profile: DeepSeekModernProfile): boolean {
