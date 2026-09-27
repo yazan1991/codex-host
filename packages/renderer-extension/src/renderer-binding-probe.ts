@@ -37,7 +37,9 @@ import {
   isComposerInputIntent,
   isComposerSubmissionKey,
   mountComposerAgentControl,
+  nativeModelIdForComposer,
   reconcileComposerNativeControls,
+  shouldBypassCodexUsageGateForNativeModel,
   renderComposerAgentControl,
   sendButtonWithin,
   type ComposerAgentControl,
@@ -928,7 +930,13 @@ export function installRendererBindingProbe(
       currentCodexAccount ?? null,
       mounted.ownershipStatus === "error",
     );
-    showCodexUsageGateStatus(mounted, mounted.codexUsageGate.update(externalSubmissionReady));
+    const nativeRouterSubmissionReady =
+      controller.get(mounted.composer).agent === "codex" &&
+      shouldBypassCodexUsageGateForNativeModel(nativeModelIdForComposer(mounted.composer));
+    showCodexUsageGateStatus(
+      mounted,
+      mounted.codexUsageGate.update(externalSubmissionReady || nativeRouterSubmissionReady),
+    );
     if (mounted.control.usage) {
       mounted.control.usage.onOpen = () => {
         void refreshThreadUsage(
