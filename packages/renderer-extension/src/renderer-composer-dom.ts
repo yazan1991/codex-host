@@ -246,14 +246,21 @@ export function isNativeModelControlCandidate(element: Element): boolean {
     : null;
   for (let depth = 0; fiber && depth < 60; depth += 1) {
     const props = fiber.memoizedProps;
-    if (
-      isRecord(props) &&
-      typeof props.onSelectModel === "function" &&
-      typeof props.onSelectReasoningEffort === "function" &&
-      "reasoningEffort" in props &&
-      isRecord(props.fallbackPowerSelection)
-    ) {
-      return true;
+    if (isRecord(props)) {
+      if (
+        typeof props.onSelectModel === "function" &&
+        typeof props.onSelectReasoningEffort === "function" &&
+        "reasoningEffort" in props &&
+        isRecord(props.fallbackPowerSelection)
+      ) {
+        return true;
+      }
+      if (
+        isRecord(props.selectedLabelCandidate) &&
+        typeof props.selectedLabelCandidate.model === "string"
+      ) {
+        return true;
+      }
     }
     const parent = fiber.return;
     fiber =
@@ -344,14 +351,19 @@ export function nativeModelIdForComposer(composer: Element): string | null {
     : null;
   for (let depth = 0; fiber && depth < 60; depth += 1) {
     const props = fiber.memoizedProps;
-    if (
-      isRecord(props) &&
-      typeof props.onSelectModel === "function" &&
-      typeof props.onSelectReasoningEffort === "function" &&
-      isRecord(props.fallbackPowerSelection)
-    ) {
-      const selected = props.fallbackPowerSelection.model;
-      return typeof selected === "string" && selected.length > 0 ? selected : null;
+    if (isRecord(props)) {
+      if (
+        typeof props.onSelectModel === "function" &&
+        typeof props.onSelectReasoningEffort === "function" &&
+        isRecord(props.fallbackPowerSelection)
+      ) {
+        const selected = props.fallbackPowerSelection.model;
+        if (typeof selected === "string" && selected.length > 0) return selected;
+      }
+      if (isRecord(props.selectedLabelCandidate)) {
+        const selected = props.selectedLabelCandidate.model;
+        if (typeof selected === "string" && selected.length > 0) return selected;
+      }
     }
     const parent = fiber.return;
     fiber =
