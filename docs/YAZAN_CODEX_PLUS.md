@@ -7,26 +7,25 @@
 - Canonical branch: `yazan/codex-plus`
 - Shared source policy: macOS arm64 and Linux x64 build from the same canonical source branch. Create a platform-specific source branch only when a genuine platform-specific source difference is demonstrated.
 
-This fork carries a narrow compatibility patch for Antigravity unattended delegation. The historical implementation is a semantic reference, not a code-shape requirement. The current patch maps an unattended create request to Antigravity's existing `dangerously-skip-permissions` mode while preserving explicit permission choices and normal upstream behavior.
+## Current maintained-fork delta
 
-## Current patch surface
+As of 2026-09-28, the historical Antigravity unattended-delegation source patch is no longer an active fork delta. Current upstream implements a stronger unattended permission policy and current DeepSeek Harness support has also superseded the old local `0.1.6-alpha.1` compatibility work. Do not replay those historical runtime patches onto newer upstream source unless a new regression independently proves they are needed.
 
-- `packages/adapters/antigravity/src/antigravity-adapter.ts`
-- `packages/adapters/antigravity/test/antigravity-adapter.test.ts`
-- `patches/ANTIGRAVITY_UNATTENDED_CONTRACT.md`
-- `scripts/verify-yazan-patch.sh`
+The active local compatibility delta is the **CLIProxy quota-gate patch** documented in:
 
-The source change is intentionally limited to create-session permission selection. It does not alter resume selection, approval hooks, questions, subagents, model or thinking selection, transport, tool projection, or file-change behavior.
+- `docs/operations/cliproxy-quota-gate-compatibility-patch.md`
 
-## Updating from upstream
+It preserves signed OpenAI authentication, Plugins/Remote, and native OpenAI quota enforcement while allowing a selected `cliproxy/*` model to submit when the OpenAI workspace quota is exhausted.
 
-1. Fetch and inspect upstream changes without changing production installations.
-2. Rebase or merge the canonical branch using normal Git review practices; do not rewrite history.
-3. Re-run `scripts/verify-yazan-patch.sh`.
-4. Confirm the explicit-permission precedence and real `agy` argument assertion still hold.
-5. Review the diff for accidental expansion beyond the two Antigravity source/test files and the maintained-fork documentation.
+### Updating from upstream
 
-Source anchors for the original behavior are historical commits `7091141` (`fix: map unattended Antigravity delegation permissions`) and `b02c37b` (`test: fix Antigravity realpath import after upstream merge`). The latter is only a test import repair and is not a separate behavior to preserve. Rollback should remove the narrow mapping and its focused tests through a reviewed source change; do not roll back by modifying an installed runtime.
+1. Fetch and inspect upstream without changing the production installation.
+2. Preserve the repository contract and replay only active local deltas.
+3. Treat historical Antigravity/DeepSeek commits as semantic history, not mandatory patches.
+4. Follow the CLIProxy quota patch regression/removal procedure before changing or dropping that compatibility layer.
+5. Never replace the provider-specific quota patch with a global quota bypass or Router login-free mode unless that is an explicit architectural decision.
+
+Historical Antigravity source anchors remain `7091141` and `b02c37b`; they are retained for archaeology only.
 
 ## Operational rules (not source patches)
 
